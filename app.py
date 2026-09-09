@@ -4,35 +4,74 @@ import psycopg2
 from lector import extraer_dosimetria_optimizada, guardar_en_bd
 from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
 
-# --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(
-    page_title="Control Dosimétrico", 
-    page_icon="☢️", 
-    layout="wide", 
-    initial_sidebar_state="expanded"
-)
+import streamlit as st
+import pandas as pd
+import psycopg2
+from lector import procesar_excel_maestro, extraer_dosimetria_optimizada, guardar_dosimetria_pdf_en_bd
+from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
 
-# --- CONTROL DE ACCESO CON CONTRASEÑA ---
+st.set_page_config(page_title="Control Dosimétrico", page_icon="☢️", layout="wide")
+
+# --- CONTROL DE ACCESO ---
 def verificar_password():
     if st.session_state.get("autenticado", False):
         return True
-
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.markdown("## 🔒 Acceso Restringido")
-        st.markdown("Introduce la clave de acceso para ver la dosimetría:")
-        clave_ingresada = st.text_input("Contraseña", type="password")
-        
-        if st.button("Iniciar Sesión", use_container_width=True):
-            if clave_ingresada == st.secrets.get("app_password", ""):
-                st.session_state["autenticado"] = True
-                st.rerun()
-            else:
-                st.error("❌ Contraseña incorrecta")
+        with st.form("login_form"):
+            st.markdown("## 🔒 Acceso Restringido")
+            clave_ingresada = st.text_input("Contraseña", type="password")
+            btn_login = st.form_submit_button("Iniciar Sesión", use_container_width=True)
+            if btn_login:
+                clave_real = st.secrets.get("app_password") or st.secrets["postgres"].get("app_password")
+                if clave_ingresada.strip() == str(clave_real).strip():
+                    st.session_state["autenticado"] = True
+                    st.rerun()
+                else:
+                    st.error("❌ Contraseña incorrecta")
     return False
 
 if not verificar_password():
-    st.stop() # Detiene la ejecución si no está autenticado
+    st.stop()
+
+# --- BARRA LATERAL: INGESTAS SEPARADAS ---
+st.sidebar.markdown("### 📥 Carga de Datos")
+tab_excel, tab_pdf = st.sidebar.tabs(["1. Excel Maestro", "2. PDFs Mensuales"])
+
+with tab_excel:
+    st.markdown("**Alta de Trabajadores/Dosímetros**")
+    archivo_excel = st.file_uploader("Subir Excel Maestro (.xlsx)", type=["xlsx", "xls"])
+    if st.button("Cargar Excel", use_container_width=True):
+        if archivo_excel:
+            with st.spinner("Procesando estructura maestra..."):
+                ok, msg = procesar_excel_maestro(archivo_excel, st.secrets["postgres"])
+                if ok:
+                    st.success(msg)
+                    st.cache_data.clear()
+                else:
+                    st.error(msg)
+        else:
+            st.warning("Selecciona un archivo Excel.")
+
+with tab_pdf:
+    st.markdown("**Lecturas Mensuales**")
+    archivos_pdf = st.file_uploader("Subir Informes (PDF)", type="pdf", accept_multiple_files=True)
+    if st.button("Procesar PDFs", use_container_width=True):
+        if archivos_pdf:
+            exitos = 0
+            for pdf in archivos_pdf:
+                with st.spinner(f"Analizando {pdf.name}..."):
+                    df_ext = extraer_dosimetria_optimizada(pdf)
+                    if not df_ext.empty and guardar_dosimetria_pdf_en_bd(df_ext, st.secrets["postgres"]):
+                        exitos += 1
+            if exitos > 0:
+                st.success(f"✅ {exitos} PDF(s) procesado(s).")
+                st.cache_data.clear()
+        else:
+            st.warning("Selecciona al menos un archivo PDF.")
+
+# --- VISTA Y TABLA DE AG-GRID (Mantiene la estructura optimizada previa) ---
+# ...
 
 
 # --- ESTILOS CSS AVANZADOS (UI/UX MODERN ERP) ---

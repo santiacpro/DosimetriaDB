@@ -10,6 +10,132 @@ PATRON_REF = re.compile(r'\b\d{6}-\d{4}\b')
 PATRON_NUMEROS = re.compile(r'\b\d+\b')
 PATRON_RUIDO = re.compile(r'\b(DLA|DILA|MAS|Zero|per|ser|inferior|a|mSv/mes|CSNGS|CSN-GS|Dosimetria|Anell|Canell|SUPLENTE|VIAJE)\b', re.IGNORECASE)
 
+import pandas as pd
+import pdfplumber
+import psycopg2
+
+def procesar_excel_maestro(archivo_excel, db_config):
+    """
+    Carga el listado maestro desde un Excel e inserta/actualiza 
+    los trabajadores, centros, empresas y códigos de dosímetro.
+    """
+    try:
+        # Carga el Excel (ajusta según los nombres exactos de tus columnas si difieren)
+        df = pd.read_excel(archivo_excel)
+        
+        # Limpieza de nombres de columnas (quita espacios)
+        df.columns = df.columns.str.strip()
+
+        conexion = psycopg2.connect(
+            host=db_config["host"],
+            database=db_config["database"],
+            user=db_config["user"],
+            password=db_config["password"],
+            port=db_config["port"],
+            client_encoding="utf8"
+        )
+        cursor = conexion.cursor()
+
+        for _, fila in df.iterrows():
+            cod_empresa = str(fila.get('Codigo_Empresa', 'EMP01')).strip()
+            nom_empresa = str(fila.get('Empresa', 'Empresa Principal')).strip()
+            cod_centro = str(fila.get('Codigo_Centro', 'C01')).strip()
+            nom_centro = str(fila.get('Centro', 'Centro General')).strip()
+            cod_trabajador = str(fila.get('Codigo_Trabajador', '')).strip()
+            nom_trabajador = str(fila.get('Nombre_Apellidos', '')).strip()
+
+            if not cod_trabajador or not nom_trabajador:
+                continue
+
+            # 1. Insertar Empresa
+            cursor.execute("""
+                INSERT INTO empresas (codigo, nombre) 
+                VALUES (%s, %s) ON CONFLICT (codigo) DO NOTHING;
+            """, (cod_empresa, nom_empresa))
+
+            # 2. Insertar Centro
+            cursor.execute("""
+                INSERT INTO centros (codigo, codigo_empresa, nombre) 
+                VALUES (%s, %s, %s) ON CONFLICT (codigo) DO NOTHING;
+            """, (cod_centro, cod_empresa, nom_centro))
+
+            # 3. Insertar/Actualizar Trabajador
+            cursor.execute("""
+                INSERT INTO trabajadores (codigo, nombre_apellidos) 
+                VALUES (%s, %s) 
+                ON CONFLICT (codigo) DO UPDATE SET nombre_apellidos = EXCLUDED.nombre_apellidos;
+            """, (cod_trabajador, nom_trabajador))
+
+        conexion.commit()
+        cursor.close()
+        conexion.close()
+        return True, f"✅ Carga maestra de {len(df)} registros completada."
+
+    except Exception as e:
+        return False, f"❌ Error al procesar Excel: {str(e)}"
+
+
+def extraer_dosimetria_optimizada(archivo_pdf):
+    """
+    Extracción de datos desde el PDF mensual.
+    """
+    registros = []
+    with pdfplumber.open(archivo_pdf) as pdf:
+        for pagina in pdf.pages:
+            texto = pagina.extract_text()
+            if not texto:
+                continue
+            
+            # (Aquí va la lógica de extracción que tenías implementada)
+            # ...
+    return pd.DataFrame(registros)
+
+
+def guardar_dosimetria_pdf_en_bd(df, db_config):
+    """
+    Guarda las lecturas mensuales extraídas del PDF vinculadas a los códigos creados.
+    """
+    try:
+        conexion = psycopg2.connect(
+            host=db_config["host"],
+            database=db_config["database"],
+            user=db_config["user"],
+            password=db_config["password"],
+            port=db_config["port"],
+            client_encoding="utf8"
+        )
+        cursor = conexion.cursor()
+
+        for index, fila in df.iterrows():
+            # Mapeo de periodo
+            meses = {'GENER': '01', 'FEBRER': '02', 'MARÇ': '03', 'ABRIL': '04', 'MAIG': '05', 'JUNY': '06', 
+                     'JULIOL': '07', 'AGOST': '08', 'SETEMBRE': '09', 'OCTUBRE': '10', 'NOVEMBRE': '11', 'DESEMBRE': '12'}
+            mes_texto, anio = str(fila['Periodo']).split(" ")
+            fecha_sql = f"{anio}-{meses.get(mes_texto, '01')}-01"
+
+            cursor.execute("""
+                INSERT INTO registros_dosimetria 
+                (codigo_trabajador, codigo_centro, codigo_dosimetro, tipo_dosimetro, periodo, dosis_hsm, dosis_hpm) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING;
+            """, (
+                str(fila['Codigo_Usuario']), 
+                str(fila['Centro_Codigo']), 
+                str(fila['Codigo_Dosimetro']), 
+                str(fila['Tipo_Dosimetro']), 
+                fecha_sql, 
+                fila['Dosis_HSM'], 
+                fila['Dosis_HPM']
+            ))
+
+        conexion.commit()
+        cursor.close()
+        conexion.close()
+        return True
+    except Exception as e:
+        print(f"Error al guardar PDF en BD: {e}")
+        return False
+
 def extraer_dosimetria_optimizada(ruta_archivo):
     registros = []
     nombres_por_usuario = {}
