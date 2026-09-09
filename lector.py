@@ -12,15 +12,48 @@ PATRON_NUMEROS = re.compile(r'\b\d+\b')
 PATRON_RUIDO = re.compile(r'\b(DLA|DILA|MAS|Zero|per|ser|inferior|a|mSv/mes|CSNGS|CSN-GS|Dosimetria|Anell|Canell|SUPLENTE|VIAJE)\b', re.IGNORECASE)
 
 
+def normalizar_codigo(codigo_raw):
+    """
+    Convierte cualquier formato de código (ej: 4542701, '4542701.0', 19802302)
+    al formato estándar de 8 dígitos con punto: '045427.01'.
+    """
+    if not codigo_raw or str(codigo_raw).lower() == 'nan':
+        return ""
+
+    s = str(codigo_raw).strip()
+
+    # Si Pandas leyó un número flotante tipo '4542701.0'
+    if s.endswith('.0'):
+        s = s[:-2]
+
+    # Si ya contiene un punto (ej: '045427.01')
+    if '.' in s:
+        partes = s.split('.')
+        return f"{partes[0].zfill(6)}.{partes[1].zfill(2)}"
+
+    # Si viene todo seguido sin punto (ej: '4542701' o '19802302')
+    s_padded = s.zfill(8)  # Rellena con ceros a la izquierda hasta tener 8 dígitos
+    return f"{s_padded[:6]}.{s_padded[-2:]}"
+
+
 def procesar_excel_maestro(archivo_excel, db_config):
     """
-    Carga los trabajadores y sus dosímetros en la tabla 'maestro_dosimetros'
-    usando las columnas exactas del Excel Maestro.
+    Carga el Excel Maestro normalizando los códigos a formato XXXXXX.YY.
     """
     try:
-        df = pd.read_excel(archivo_excel)
-        # Limpieza y normalización de columnas
-        df.columns = df.columns.str.strip().str.upper()
+        df = pd.read_excel(archivo_excel, dtype=str)
+        
+        # Normalizar encabezados (mayúsculas, sin tildes ni espacios)
+        df.columns = (
+            df.columns.astype(str)
+            .str.strip()
+            .str.upper()
+            .str.replace('Ó', 'O')
+            .str.replace('Í', 'I')
+            .str.replace('Á', 'A')
+            .str.replace('É', 'E')
+            .str.replace('Ú', 'U')
+        )
 
         conexion = psycopg2.connect(
             host=db_config["host"],
@@ -34,8 +67,8 @@ def procesar_excel_maestro(archivo_excel, db_config):
 
         insertados = 0
         for _, fila in df.iterrows():
-            codigo = str(fila.get('CODIGO', '')).strip()
-            if not codigo or codigo == "nan":
+            codigo_normalizado = normalizar_codigo(fila.get('CODIGO'))
+            if not codigo_normalizado:
                 continue
 
             alta = pd.to_datetime(fila.get('ALTA'), errors='coerce')
@@ -56,12 +89,12 @@ def procesar_excel_maestro(archivo_excel, db_config):
                     fecha_alta = EXCLUDED.fecha_alta,
                     fecha_baja = EXCLUDED.fecha_baja;
             """, (
-                codigo,
-                str(fila.get('APELLIDOS', '')).strip() if pd.notnull(fila.get('APELLIDOS')) else '',
-                str(fila.get('NOMBRE', '')).strip() if pd.notnull(fila.get('NOMBRE')) else '',
-                str(fila.get('DNI', '')).strip() if pd.notnull(fila.get('DNI')) else '',
-                str(fila.get('CENTRO', '')).strip() if pd.notnull(fila.get('CENTRO')) else '',
-                str(fila.get('DOSIMETRO', '')).strip() if pd.notnull(fila.get('DOSIMETRO')) else '',
+                codigo_normalizado,
+                str(fila.get('APELLIDOS', '')).strip() if pd.notnull(fila.get('APELLIDOS')) and str(fila.get('APELLIDOS')).lower() != 'nan' else '',
+                str(fila.get('NOMBRE', '')).strip() if pd.notnull(fila.get('NOMBRE')) and str(fila.get('NOMBRE')).lower() != 'nan' else '',
+                str(fila.get('DNI', '')).strip() if pd.notnull(fila.get('DNI')) and str(fila.get('DNI')).lower() != 'nan' else '',
+                str(fila.get('CENTRO', '')).strip() if pd.notnull(fila.get('CENTRO')) and str(fila.get('CENTRO')).lower() != 'nan' else '',
+                str(fila.get('DOSIMETRO', '')).strip() if pd.notnull(fila.get('DOSIMETRO')) and str(fila.get('DOSIMETRO')).lower() != 'nan' else '',
                 alta_str,
                 baja_str
             ))
@@ -78,7 +111,7 @@ def procesar_excel_maestro(archivo_excel, db_config):
 
 def extraer_dosimetria_optimizada(archivo_pdf):
     """
-    Extrae las lecturas de dosis del PDF mensual usando expresiones regulares.
+    Extracción de dosis desde el PDF.
     """
     registros = []
     nombres_por_usuario = {}
@@ -96,18 +129,16 @@ def extraer_dosimetria_optimizada(archivo_pdf):
                 if not linea_limpia: 
                     continue
 
-                # Captura del período del informe
                 if "INFORME MENSUAL" in linea_limpia.upper():
                     mes_informe = linea_limpia.split("PERSONAL ")[-1].strip()
 
-                # Procesamiento de líneas de datos por código
                 match_codigo = PATRON_CODIGO.match(linea_limpia)
                 if match_codigo:
                     try:
-                        codigo_completo = match_codigo.group(0) # ej: "123456.01"
+                        codigo_completo = normalizar_codigo(match_codigo.group(0))
                         codigo_usuario, _ = match_codigo.groups()
                         
-                        linea_sin_id = linea_limpia.replace(codigo_completo, "")
+                        linea_sin_id = linea_limpia.replace(match_codigo.group(0), "")
                         
                         es_anillo = bool(re.search(r'\b(anell|anillo)\b', linea_sin_id, re.IGNORECASE))
                         es_muneca = bool(re.search(r'\b(canell|muñeca)\b', linea_sin_id, re.IGNORECASE))
@@ -120,7 +151,6 @@ def extraer_dosimetria_optimizada(archivo_pdf):
                         else: 
                             tipo_dosimetro = "Solapa"
                         
-                        # Limpieza de texto para obtener nombres
                         txt_nombres = PATRON_FECHAS.sub('', linea_sin_id)
                         txt_nombres = PATRON_REF.sub('', txt_nombres)
                         txt_nombres = PATRON_DECIMALES.sub('', txt_nombres)
@@ -150,7 +180,7 @@ def extraer_dosimetria_optimizada(archivo_pdf):
                         
                         registros.append({
                             "Periodo": mes_informe,
-                            "Codigo_Dosimetro": codigo_completo,  # Se enlaza con el CODIGO del Excel
+                            "Codigo_Dosimetro": codigo_completo,
                             "Nombre_Apellidos": nombre_final,
                             "Tipo_Dosimetro": tipo_dosimetro,
                             "Dosis_HSM": hsm_float,
@@ -164,8 +194,7 @@ def extraer_dosimetria_optimizada(archivo_pdf):
 
 def guardar_dosimetria_pdf_en_bd(df_pdf, db_config):
     """
-    Inserta las dosis leídas del PDF en la tabla 'registros_dosimetria',
-    vinculándolas por el campo 'codigo_dosimetro'.
+    Inserta las dosis del PDF y detecta los dosímetros faltantes del centro.
     """
     if df_pdf.empty:
         return False
@@ -190,17 +219,22 @@ def guardar_dosimetria_pdf_en_bd(df_pdf, db_config):
             'NOVIEMBRE': '11', 'DICIEMBRE': '12'
         }
 
-        for _, fila in df_pdf.iterrows():
-            codigo_dosimetro = str(fila['Codigo_Dosimetro']).strip()
-            
-            partes = str(fila['Periodo']).strip().upper().split(" ")
-            if len(partes) >= 2:
-                mes_texto, anio = partes[0], partes[-1]
-            else:
-                mes_texto, anio = "GENER", "2026"
+        codigos_leidos = []
+        fecha_sql_global = None
 
+        # 1. Guardar las dosis leídas
+        for _, fila in df_pdf.iterrows():
+            codigo_dosimetro = normalizar_codigo(fila['Codigo_Dosimetro'])
+
+            cursor.execute("SELECT 1 FROM maestro_dosimetros WHERE codigo = %s;", (codigo_dosimetro,))
+            if not cursor.fetchone():
+                continue
+
+            partes = str(fila['Periodo']).strip().upper().split(" ")
+            mes_texto, anio = (partes[0], partes[-1]) if len(partes) >= 2 else ("GENER", "2026")
             mes_num = meses.get(mes_texto, '01')
             fecha_sql = f"{anio}-{mes_num}-01"
+            fecha_sql_global = fecha_sql  # Asumimos que un PDF pertenece a un único mes
 
             cursor.execute("""
                 INSERT INTO registros_dosimetria (codigo_dosimetro, periodo, dosis_hsm, dosis_hpm)
@@ -209,6 +243,35 @@ def guardar_dosimetria_pdf_en_bd(df_pdf, db_config):
                     dosis_hsm = EXCLUDED.dosis_hsm,
                     dosis_hpm = EXCLUDED.dosis_hpm;
             """, (codigo_dosimetro, fecha_sql, fila['Dosis_HSM'], fila['Dosis_HPM']))
+            
+            codigos_leidos.append(codigo_dosimetro)
+
+        # 2. Generar avisos de faltantes
+        if codigos_leidos and fecha_sql_global:
+            # Obtener los centros que están incluidos en este PDF
+            cursor.execute("""
+                SELECT DISTINCT centro FROM maestro_dosimetros 
+                WHERE codigo = ANY(%s)
+            """, (codigos_leidos,))
+            centros_pdf = [row[0] for row in cursor.fetchall()]
+
+            # Buscar a todos los trabajadores activos de esos centros
+            cursor.execute("""
+                SELECT codigo FROM maestro_dosimetros 
+                WHERE centro = ANY(%s) 
+                AND (fecha_baja IS NULL OR fecha_baja >= %s)
+            """, (centros_pdf, fecha_sql_global))
+            todos_codigos_centro = [row[0] for row in cursor.fetchall()]
+
+            # Los que están en el centro pero no en el PDF son "faltantes"
+            faltantes = set(todos_codigos_centro) - set(codigos_leidos)
+
+            for cod in faltantes:
+                cursor.execute("""
+                    INSERT INTO avisos (codigo_dosimetro, periodo, estado)
+                    VALUES (%s, %s, 'Pendiente')
+                    ON CONFLICT DO NOTHING;
+                """, (cod, fecha_sql_global))
 
         conexion.commit()
         cursor.close()
