@@ -12,6 +12,29 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# --- CONTROL DE ACCESO CON CONTRASEÑA ---
+def verificar_password():
+    if st.session_state.get("autenticado", False):
+        return True
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("## 🔒 Acceso Restringido")
+        st.markdown("Introduce la clave de acceso para ver la dosimetría:")
+        clave_ingresada = st.text_input("Contraseña", type="password")
+        
+        if st.button("Iniciar Sesión", use_container_width=True):
+            if clave_ingresada == st.secrets.get("app_password", ""):
+                st.session_state["autenticado"] = True
+                st.rerun()
+            else:
+                st.error("❌ Contraseña incorrecta")
+    return False
+
+if not verificar_password():
+    st.stop() # Detiene la ejecución si no está autenticado
+
+
 # --- ESTILOS CSS AVANZADOS (UI/UX MODERN ERP) ---
 st.markdown("""
     <style>
