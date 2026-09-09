@@ -84,6 +84,7 @@ archivos_pdf = st.sidebar.file_uploader(
     help="Selecciona uno o varios PDFs de dosimetría para procesar e inyectar en la base de datos."
 )
 
+# --- GUARDADO CON SECRETS ---
 if st.sidebar.button("⚙️ Procesar y Cargar", use_container_width=True):
     if archivos_pdf:
         exitos = 0
@@ -91,7 +92,8 @@ if st.sidebar.button("⚙️ Procesar y Cargar", use_container_width=True):
             with st.spinner(f"Analizando {archivo.name}..."):
                 df_extraido = extraer_dosimetria_optimizada(archivo)
                 if not df_extraido.empty:
-                    guardar_en_bd(df_extraido, "acprosimetria")
+                    # Le pasamos los secrets de la base de datos
+                    guardar_en_bd(df_extraido, st.secrets["postgres"])
                     exitos += 1
                 else:
                     st.sidebar.error(f"Error procesando {archivo.name}")
@@ -101,15 +103,17 @@ if st.sidebar.button("⚙️ Procesar y Cargar", use_container_width=True):
     else:
         st.sidebar.warning("Selecciona al menos un archivo PDF.")
 
-st.sidebar.markdown("---")
-
-# --- EXTRACCIÓN Y TRANSFORMACIÓN DE DATOS ---
+# --- LECTURA CON SECRETS ---
 @st.cache_data
 def cargar_y_transformar_datos():
     try:
         conexion = psycopg2.connect(
-            host="localhost", database="postgres", user="postgres",
-            password="acprosimetria", port="5432", client_encoding="utf8"
+            host=st.secrets["postgres"]["host"],
+            database=st.secrets["postgres"]["database"],
+            user=st.secrets["postgres"]["user"],
+            password=st.secrets["postgres"]["password"],
+            port=st.secrets["postgres"]["port"],
+            client_encoding="utf8"
         )
         query = """
             SELECT t.nombre_apellidos AS "Nombre", c.nombre AS "CENTRO", r.tipo_dosimetro AS "Dosímetro",
@@ -123,6 +127,7 @@ def cargar_y_transformar_datos():
     except Exception as e:
         st.error(f"Error al conectar con la base de datos: {e}")
         return pd.DataFrame()
+
 
     if df.empty: 
         return df

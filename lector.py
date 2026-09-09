@@ -113,57 +113,49 @@ def extraer_dosimetria_optimizada(ruta_archivo):
 import psycopg2
 from psycopg2 import sql
 
-def guardar_en_bd(df, password_db):
-    # 1. Conexión a la base de datos
+def guardar_en_bd(df, db_config):
+    # 1. Conexión a la base de datos usando la configuración dinámica
     try:
         conexion = psycopg2.connect(
-            host="localhost",
-            database="postgres",
-            user="postgres",
-            password=password_db, # ¡Asegúrate de pasar aquí tu contraseña real!
-            port="5432",
-            client_encoding="utf8" # Forzamos UTF-8
+            host=db_config["host"],
+            database=db_config["database"],
+            user=db_config["user"],
+            password=db_config["password"],
+            port=db_config["port"],
+            client_encoding="utf8"
         )
         cursor = conexion.cursor()
         
-        # Iteramos sobre cada fila de resultados del PDF
         for index, fila in df.iterrows():
-            
-            # 2. Insertar Empresa (Si ya existe, la ignora)
             cursor.execute("""
                 INSERT INTO empresas (codigo, nombre) 
                 VALUES (%s, %s) ON CONFLICT (codigo) DO NOTHING;
             """, (fila['Empresa_Codigo'], fila['Empresa_Nombre']))
             
-            # 3. Insertar Centro
             cursor.execute("""
                 INSERT INTO centros (codigo, codigo_empresa, nombre) 
                 VALUES (%s, %s, %s) ON CONFLICT (codigo) DO NOTHING;
             """, (fila['Centro_Codigo'], fila['Empresa_Codigo'], fila['Centro_Nombre']))
             
-            # 4. Insertar Trabajador (Actualiza el nombre por si cambia, ej. por estado civil)
             cursor.execute("""
                 INSERT INTO trabajadores (codigo, nombre_apellidos) 
                 VALUES (%s, %s) 
                 ON CONFLICT (codigo) DO UPDATE SET nombre_apellidos = EXCLUDED.nombre_apellidos;
             """, (fila['Codigo_Usuario'], fila['Nombre_Apellidos']))
             
-            # Convertir periodo "GENER 2026" a fecha (ej. '2026-01-01')
             meses = {'GENER': '01', 'FEBRER': '02', 'MARÇ': '03', 'ABRIL': '04', 'MAIG': '05', 'JUNY': '06', 
                      'JULIOL': '07', 'AGOST': '08', 'SETEMBRE': '09', 'OCTUBRE': '10', 'NOVEMBRE': '11', 'DESEMBRE': '12'}
             mes_texto, anio = fila['Periodo'].split(" ")
             fecha_sql = f"{anio}-{meses.get(mes_texto, '01')}-01"
             
-            # 5. Insertar Registro de Dosimetría
             cursor.execute("""
                 INSERT INTO registros_dosimetria 
                 (codigo_trabajador, codigo_centro, codigo_dosimetro, tipo_dosimetro, periodo, dosis_hsm, dosis_hpm) 
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING; -- Evita duplicar el mismo registro si lees el PDF dos veces
+                ON CONFLICT DO NOTHING;
             """, (fila['Codigo_Usuario'], fila['Centro_Codigo'], fila['Codigo_Dosimetro'], 
                   fila['Tipo_Dosimetro'], fecha_sql, fila['Dosis_HSM'], fila['Dosis_HPM']))
             
-        # Guardar cambios y cerrar
         conexion.commit()
         cursor.close()
         conexion.close()
