@@ -2,181 +2,125 @@ import unicodedata
 import streamlit as st
 import pandas as pd
 import psycopg2
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode, GridUpdateMode, DataReturnMode
+from lector import procesar_excel_maestro, procesar_excel_centros, extraer_dosimetria_optimizada, guardar_dosimetria_pdf_en_bd
+# --- CONFIGURACIÓN DE PÁGINA Y CSS PROFESIONAL ---
+st.set_page_config(page_title="DosimetriaDB", page_icon="☢️", layout="wide", initial_sidebar_state="expanded")
 
-st.set_page_config(page_title="Control Dosimétrico", page_icon="☢️", layout="wide")
-
-# --- FUNCIONES AUXILIARES ---
-def quitar_tildes(texto):
-    if not isinstance(texto, str):
-        return ""
-    return "".join(
-        c for c in unicodedata.normalize('NFD', texto)
-        if unicodedata.category(c) != 'Mn'
-    ).upper()
-
-# --- ESTILOS CSS ---
 st.markdown("""
     <style>
         .block-container {
-            padding-top: 2.5rem !important;
+            padding-top: 2rem !important;
             padding-bottom: 0rem !important;
             padding-left: 1.5rem !important;
             padding-right: 1.5rem !important;
             max-width: 100% !important;
         }
-        .ag-header-cell-label, .ag-header-group-cell-label, .ag-header-cell-text, .ag-header-group-text {
-            justify-content: center !important;
-            text-align: center !important;
-            width: 100% !important;
+        
+        [data-testid="stSidebarHeader"] {
+            padding: 0 !important;
+            min-height: 0 !important;
+            height: 0 !important;
         }
-        .ag-cell {
-            display: flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-            text-align: center !important;
+        
+        section[data-testid="stSidebar"] > div:first-child {
+            padding-top: 1rem !important;
         }
+        
+        [data-testid="stSidebar"] h3 {
+            margin-top: 0.5rem !important;
+            margin-bottom: 1.0rem !important;
+            padding-bottom: 0 !important;
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+        
+        [data-testid="stSidebar"] .stElementContainer {
+            margin-bottom: -0.5rem !important;
+        }
+        
+        header {visibility: hidden;}
     </style>
 """, unsafe_allow_html=True)
 
-from lector import procesar_excel_maestro, extraer_dosimetria_optimizada, guardar_dosimetria_pdf_en_bd
+
+# --- FUNCIONES AUXILIARES ---
+def quitar_tildes(texto):
+    if not isinstance(texto, str): return ""
+    texto_limpio = "".join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn').upper()
+    return texto_limpio.replace('CH', 'CZZZ')
 
 # --- CONTROL DE ACCESO ---
-def verificar_password():
-    if st.session_state.get("autenticado", False):
-        return True
+if "autenticado" not in st.session_state:
+    st.session_state["autenticado"] = False
+
+if not st.session_state["autenticado"]:
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         with st.form("login_form"):
             st.markdown("## 🔒 Acceso Restringido")
             clave_ingresada = st.text_input("Contraseña", type="password")
-            btn_login = st.form_submit_button("Iniciar Sesión", use_container_width=True)
-            if btn_login:
+            if st.form_submit_button("Iniciar Sesión", use_container_width=True):
                 clave_real = st.secrets.get("app_password") or st.secrets["postgres"].get("app_password")
                 if clave_ingresada.strip() == str(clave_real).strip():
                     st.session_state["autenticado"] = True
                     st.rerun()
                 else:
                     st.error("❌ Contraseña incorrecta")
-    return False
-
-if not verificar_password():
     st.stop()
 
+# --- CONEXIÓN Y MIGRACIÓN INICIAL BD ---
 pg = st.secrets["postgres"]
 db_url = f"postgresql://{pg['user']}:{pg['password']}@{pg['host']}:{pg['port']}/{pg['database']}"
 engine = create_engine(db_url)
 
-# --- MENÚ SUPERIOR DE OPCIONES DE ADMINISTRACIÓN ---
-with st.expander("⚙️ Opciones de Administración", expanded=False):
-    tab_excel, tab_borrar, tab_backup = st.tabs(["📥 Excel Maestro", "🗑️ Borrar Mes", "💾 Copias de Seguridad"])
-    
-    with tab_excel:
-        st.markdown("**Actualizar o Cargar lista de Trabajadores**")
-        archivo_excel = st.file_uploader("Subir Excel Maestro (.xlsx)", type=["xlsx", "xls"], key="up_excel")
-        if st.button("Cargar Excel", use_container_width=True):
-            if archivo_excel:
-                with st.spinner("Procesando..."):
-                    ok, msg = procesar_excel_maestro(archivo_excel, st.secrets["postgres"])
-                    if ok:
-                        st.success(msg)
-                        st.cache_data.clear()
-                        st.rerun()
-                    else:
-                        st.error(msg)
-                        
-    with tab_borrar:
-        st.markdown("**Borrar lecturas extraídas de un mes específico**")
-        try:
-            df_periodos = pd.read_sql_query("SELECT DISTINCT periodo FROM registros_dosimetria ORDER BY periodo DESC", engine)
-            if not df_periodos.empty:
-                # CORRECCIÓN: Convertir explícitamente a datetime antes de extraer .dt
-                df_periodos['periodo'] = pd.to_datetime(df_periodos['periodo'])
-                opciones_mes = df_periodos['periodo'].dt.strftime('%Y-%m-%d').tolist()
-                mes_a_borrar = st.selectbox("Selecciona el mes a eliminar:", opciones_mes)
-                if st.button("⚠️ Borrar datos de este mes", type="primary"):
-                    conn = psycopg2.connect(host=pg["host"], database=pg["database"], user=pg["user"], password=pg["password"], port=pg["port"])
-                    cur = conn.cursor()
-                    cur.execute("DELETE FROM registros_dosimetria WHERE periodo = %s", (mes_a_borrar,))
-                    conn.commit()
-                    conn.close()
-                    st.success(f"Datos de {mes_a_borrar} eliminados.")
-                    st.cache_data.clear()
-                    st.rerun()
-            else:
-                st.info("No hay lecturas registradas.")
-        except Exception as e:
-            st.error(f"Error cargando periodos: {e}")
+try:
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS avisos (
+                id SERIAL PRIMARY KEY,
+                codigo_dosimetro VARCHAR NOT NULL,
+                periodo DATE NOT NULL,
+                estado VARCHAR DEFAULT 'Pendiente',
+                tipo_aviso VARCHAR DEFAULT 'Faltan lecturas'
+            );
+            ALTER TABLE avisos ADD COLUMN IF NOT EXISTS tipo_aviso VARCHAR DEFAULT 'Faltan lecturas';
+        """))
+except Exception as e:
+    print(f"Error en migración inicial: {e}")
 
-    with tab_backup:
-        st.markdown("**Exportar e Importar CSV de Lecturas (Registros de Dosis)**")
-        col_down, col_up = st.columns(2)
-        with col_down:
-            try:
-                df_dump = pd.read_sql_query("SELECT * FROM registros_dosimetria", engine)
-                csv_backup = df_dump.to_csv(index=False).encode('utf-8')
-                st.download_button(label="📥 Descargar Copia (CSV)", data=csv_backup, file_name="backup_lecturas.csv", mime="text/csv", use_container_width=True)
-            except:
-                st.warning("Error al preparar descarga.")
-        with col_up:
-            csv_upload = st.file_uploader("Subir CSV para Restaurar", type=["csv"], key="up_csv")
-            if st.button("⬆️ Restaurar Copia", use_container_width=True):
-                if csv_upload:
-                    try:
-                        df_restore = pd.read_csv(csv_upload)
-                        df_restore.to_sql('registros_dosimetria', engine, if_exists='append', index=False)
-                        st.success("Copia restaurada con éxito.")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error al restaurar: {e}")
+# --- INICIALIZACIÓN DE ESTADOS ---
+if "filtro_busqueda" not in st.session_state: st.session_state.filtro_busqueda = ""
+if "filtro_centro" not in st.session_state: st.session_state.filtro_centro = "Todos los centros"
+if "mes_sin_lectura" not in st.session_state: st.session_state.mes_sin_lectura = "-- Ver todos --"
+if "pdf_uploader_key" not in st.session_state: st.session_state.pdf_uploader_key = 0
 
-# --- BARRA LATERAL: INGESTA DE PDF ---
-st.sidebar.markdown("### 📄 Subir Lecturas")
-archivos_pdf = st.sidebar.file_uploader("Subir PDFs del Mes", type="pdf", accept_multiple_files=True)
-if st.sidebar.button("Procesar PDFs", use_container_width=True):
-    if archivos_pdf:
-        exitos = 0
-        for pdf in archivos_pdf:
-            with st.spinner(f"Analizando {pdf.name}..."):
-                df_ext = extraer_dosimetria_optimizada(pdf)
-                if not df_ext.empty and guardar_dosimetria_pdf_en_bd(df_ext, st.secrets["postgres"]):
-                    exitos += 1
-        if exitos > 0:
-            st.sidebar.success(f"✅ {exitos} PDF(s) procesado(s).")
-            st.cache_data.clear()
-            st.rerun()
-
-# --- CONSULTA Y TRANSFORMACIÓN DE DATOS ---
+# --- CARGA DE DATOS MAESTROS (Caché) ---
 @st.cache_data
-def cargar_y_transformar_datos():
+def cargar_datos_completos():
     try:
         query_maestro = "SELECT codigo AS \"CODIGO\", CONCAT(apellidos, ', ', nombre) AS \"NOMBRE\", dni AS \"DNI\", centro AS \"CENTRO\", dosimetro AS \"DOSIMETRO\", TO_CHAR(fecha_alta, 'YYYY-MM-DD') AS \"FECHA ALTA\", TO_CHAR(fecha_baja, 'YYYY-MM-DD') AS \"FECHA BAJA\" FROM maestro_dosimetros"
         df_maestro = pd.read_sql_query(query_maestro, engine)
-        if df_maestro.empty: return pd.DataFrame()
+        if df_maestro.empty: return pd.DataFrame(), {}
 
         query_dosis = "SELECT codigo_dosimetro AS \"CODIGO\", EXTRACT(MONTH FROM periodo)::INTEGER AS \"Mes_Num\", dosis_hsm, dosis_hpm, observaciones FROM registros_dosimetria"
         df_dosis = pd.read_sql_query(query_dosis, engine)
     except Exception as e:
-        st.error(f"Error: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), {}
 
     meses_nombres = {1: 'ENERO', 2: 'FEBRERO', 3: 'MARZO', 4: 'ABRIL', 5: 'MAYO', 6: 'JUNIO', 7: 'JULIO', 8: 'AGOSTO', 9: 'SEPTIEMBRE', 10: 'OCTUBRE', 11: 'NOVIEMBRE', 12: 'DICIEMBRE'}
     df_flat = df_maestro.copy()
 
     for m in range(1, 13):
         mes = meses_nombres[m]
-        df_flat[f"{mes}_HSM"] = None
-        df_flat[f"{mes}_HPM"] = None
-        df_flat[f"{mes}_OBS"] = ""
+        df_flat[f"{mes}_HSM"] = None; df_flat[f"{mes}_HPM"] = None; df_flat[f"{mes}_OBS"] = ""
 
     if not df_dosis.empty:
         for _, row in df_dosis.iterrows():
             cod = str(row["CODIGO"]).strip()
-            m_num = row["Mes_Num"]
-            if pd.notnull(m_num) and 1 <= int(m_num) <= 12:
-                mes = meses_nombres[int(m_num)]
+            if pd.notnull(row["Mes_Num"]) and 1 <= int(row["Mes_Num"]) <= 12:
+                mes = meses_nombres[int(row["Mes_Num"])]
                 mask = df_flat["CODIGO"] == cod
                 df_flat.loc[mask, f"{mes}_HSM"] = row["dosis_hsm"]
                 df_flat.loc[mask, f"{mes}_HPM"] = row["dosis_hpm"]
@@ -194,228 +138,441 @@ def cargar_y_transformar_datos():
 
     return df_flat, meses_nombres
 
-# --- FUNCIONES DE AVISOS ---
-def resolver_no_entregado(aviso_id, codigo, periodo):
-    conn = psycopg2.connect(host=pg["host"], database=pg["database"], user=pg["user"], password=pg["password"], port=pg["port"])
-    cur = conn.cursor()
-    cur.execute("INSERT INTO registros_dosimetria (codigo_dosimetro, periodo, dosis_hsm, dosis_hpm, observaciones) VALUES (%s, %s, NULL, NULL, 'No entregado') ON CONFLICT (codigo_dosimetro, periodo) DO UPDATE SET observaciones = 'No entregado';", (codigo, periodo))
-    cur.execute("UPDATE avisos SET estado = 'Resuelto' WHERE id = %s", (aviso_id,))
-    conn.commit(); conn.close()
-    st.cache_data.clear(); st.rerun()
+df_flat, meses_nombres = cargar_datos_completos()
 
-def resolver_baja(aviso_id, codigo, fecha_baja):
-    conn = psycopg2.connect(host=pg["host"], database=pg["database"], user=pg["user"], password=pg["password"], port=pg["port"])
-    cur = conn.cursor()
-    cur.execute("UPDATE maestro_dosimetros SET fecha_baja = %s WHERE codigo = %s", (fecha_baja, codigo))
-    cur.execute("UPDATE avisos SET estado = 'Resuelto' WHERE id = %s", (aviso_id,))
-    conn.commit(); conn.close()
-    st.cache_data.clear(); st.rerun()
+# --- PANEL LATERAL (SIDEBAR) ---
+st.sidebar.markdown("### 📄 Subir PDFs")
+archivos_pdf = st.sidebar.file_uploader("Arrastra los informes mensuales", type="pdf", accept_multiple_files=True, key=f"pdf_uploader_{st.session_state.pdf_uploader_key}", label_visibility="collapsed")
+if st.sidebar.button("Procesar PDFs", use_container_width=True, type="primary"):
+    if archivos_pdf:
+        exitos = 0
+        for pdf in archivos_pdf:
+            with st.spinner(f"Analizando {pdf.name}..."):
+                df_ext = extraer_dosimetria_optimizada(pdf)
+                if not df_ext.empty and guardar_dosimetria_pdf_en_bd(df_ext, st.secrets["postgres"]):
+                    exitos += 1
+        if exitos > 0:
+            st.sidebar.success(f"✅ {exitos} PDF(s) procesado(s).")
+            st.session_state.pdf_uploader_key += 1
+            st.cache_data.clear()
+            st.rerun()
+
+st.sidebar.markdown("### 🏢 Filtrar Centros")
+if not df_flat.empty:
+    centros_disponibles = sorted([str(c).strip() for c in df_flat["CENTRO"].dropna().unique() if str(c).strip() != "" and str(c).lower() != "nan"], key=quitar_tildes)
+    opciones_centros = ["Todos los centros"] + centros_disponibles
+    if st.session_state.filtro_centro not in opciones_centros:
+        st.session_state.filtro_centro = "Todos los centros"
+else:
+    opciones_centros = ["Todos los centros"]
+
+st.session_state.filtro_centro = st.sidebar.selectbox("Selecciona un centro:", options=opciones_centros, index=opciones_centros.index(st.session_state.filtro_centro), label_visibility="collapsed")
+
+st.sidebar.markdown("### 🔎 Buscador General")
+st.session_state.filtro_busqueda = st.sidebar.text_input("Buscar por Nombre, DNI...", value=st.session_state.filtro_busqueda, label_visibility="collapsed").strip().lower()
+
+st.sidebar.markdown("### 🔍 Aislar sin Lectura")
+opciones_meses_faltantes = ["-- Ver todos --"] + (list(meses_nombres.values()) if 'meses_nombres' in locals() else [])
+st.session_state.mes_sin_lectura = st.sidebar.selectbox(
+    "Selecciona mes sin dosis:",
+    options=opciones_meses_faltantes,
+    index=opciones_meses_faltantes.index(st.session_state.mes_sin_lectura) if st.session_state.mes_sin_lectura in opciones_meses_faltantes else 0,
+    label_visibility="collapsed"
+)
+
+df_display = df_flat.copy() if not df_flat.empty else pd.DataFrame()
+
+if not df_display.empty:
+    if st.session_state.filtro_centro != "Todos los centros":
+        df_display = df_display[df_display["CENTRO"] == st.session_state.filtro_centro]
+    if st.session_state.filtro_busqueda:
+        busqueda_normalizada = quitar_tildes(st.session_state.filtro_busqueda)
+        mask = (df_display["NOMBRE"].apply(quitar_tildes).str.contains(busqueda_normalizada, na=False) |
+                df_display["DNI"].astype(str).str.lower().str.contains(st.session_state.filtro_busqueda, na=False) |
+                df_display["CODIGO"].astype(str).str.lower().str.contains(st.session_state.filtro_busqueda, na=False) |
+                df_display["CENTRO"].apply(quitar_tildes).str.contains(busqueda_normalizada, na=False))
+        df_display = df_display[mask]
+        
+    if st.session_state.mes_sin_lectura != "-- Ver todos --":
+        m_col = st.session_state.mes_sin_lectura
+        mask_missing = (
+            (df_display[f"{m_col}_HSM"].isna() | (df_display[f"{m_col}_HSM"] == "")) &
+            (df_display[f"{m_col}_HPM"].isna() | (df_display[f"{m_col}_HPM"] == ""))
+        )
+        df_display = df_display[mask_missing]
+
+st.sidebar.markdown("### 📥 Exportar Vista Actual")
+csv_data = df_display.to_csv(index=False, encoding='utf-8-sig') if not df_display.empty else ""
+st.sidebar.download_button(
+    label="Descargar vista actual (CSV)",
+    data=csv_data,
+    file_name=f"dosimetria_{st.session_state.filtro_centro.replace(' ', '_')}.csv",
+    mime="text/csv",
+    use_container_width=True
+)
+
+st.sidebar.markdown("---")
+with st.sidebar.expander("⚙️ Opciones de Administración", expanded=False):
+    admin_op = st.selectbox("Acción:", [
+        "📥 Cargar Excel Maestro", 
+        "🏢 Cargar Excel de Centros", 
+        "🗑️ Borrar Datos de un Mes", 
+        "💾 Copias de Seguridad"
+    ])
+    
+    if admin_op == "📥 Cargar Excel Maestro":
+        archivo_excel = st.file_uploader("Subir Excel Maestro (.xlsx)", type=["xlsx", "xls"], key="up_excel")
+        if st.button("Ejecutar carga Maestro", use_container_width=True):
+            if archivo_excel:
+                ok, msg = procesar_excel_maestro(archivo_excel, st.secrets["postgres"])
+                if ok: st.success(msg); st.cache_data.clear(); st.rerun()
+                else: st.error(msg)
+
+    elif admin_op == "🏢 Cargar Excel de Centros":
+        archivo_centros = st.file_uploader("Subir Excel de Centros (.xlsx)", type=["xlsx", "xls"], key="up_centros")
+        if st.button("Ejecutar carga Centros", use_container_width=True):
+            if archivo_centros:
+                ok, msg = procesar_excel_centros(archivo_centros, st.secrets["postgres"])
+                if ok: st.success(msg); st.cache_data.clear(); st.rerun()
+                else: st.error(msg)
+                
+    elif admin_op == "🗑️ Borrar Datos de un Mes":
+        try:
+            df_p = pd.read_sql_query("SELECT DISTINCT TO_CHAR(periodo, 'YYYY-MM-DD') AS periodo FROM registros_dosimetria ORDER BY periodo DESC", engine)
+            opciones_meses = ["Todos los meses"] + (df_p['periodo'].tolist() if not df_p.empty else [])
+            mes_a_borrar = st.selectbox("Mes a eliminar:", opciones_meses)
+            opciones_borrado = ["Todos los centros"] + centros_disponibles
+            centro_a_borrar = st.selectbox("Centro a afectar:", opciones_borrado)
+            
+            if st.button("⚠️ Eliminar datos", type="primary", use_container_width=True):
+                conn = psycopg2.connect(
+                    host=pg["host"], database=pg["database"], user=pg["user"], password=pg["password"], port=pg["port"]
+                )
+                cur = conn.cursor()
+                
+                if mes_a_borrar == "Todos los meses" and centro_a_borrar == "Todos los centros":
+                    cur.execute("DELETE FROM registros_dosimetria")
+                    cur.execute("DELETE FROM avisos")
+                elif mes_a_borrar == "Todos los meses" and centro_a_borrar != "Todos los centros":
+                    cur.execute("DELETE FROM registros_dosimetria WHERE codigo_dosimetro IN (SELECT codigo FROM maestro_dosimetros WHERE centro = %s)", (centro_a_borrar,))
+                    cur.execute("DELETE FROM avisos WHERE codigo_dosimetro IN (SELECT codigo FROM maestro_dosimetros WHERE centro = %s)", (centro_a_borrar,))
+                elif mes_a_borrar != "Todos los meses" and centro_a_borrar == "Todos los centros":
+                    cur.execute("DELETE FROM registros_dosimetria WHERE periodo = %s", (mes_a_borrar,))
+                    cur.execute("DELETE FROM avisos WHERE periodo = %s", (mes_a_borrar,))
+                else:
+                    cur.execute("DELETE FROM registros_dosimetria WHERE periodo = %s AND codigo_dosimetro IN (SELECT codigo FROM maestro_dosimetros WHERE centro = %s)", (mes_a_borrar, centro_a_borrar))
+                    cur.execute("DELETE FROM avisos WHERE periodo = %s AND codigo_dosimetro IN (SELECT codigo FROM maestro_dosimetros WHERE centro = %s)", (mes_a_borrar, centro_a_borrar))
+                
+                conn.commit()
+                conn.close()
+                st.success(f"Datos eliminados con éxito ({mes_a_borrar} - {centro_a_borrar}).")
+                st.cache_data.clear()
+                st.rerun()
+                
+        except Exception as e:
+            st.error(f"Error en la herramienta de borrado: {e}")
+
+    elif admin_op == "💾 Copias de Seguridad":
+        col1, col2 = st.columns(2)
+        try:
+            df_dump = pd.read_sql_query("SELECT * FROM registros_dosimetria", engine)
+            col1.download_button("📥 Bajar CSV", data=df_dump.to_csv(index=False).encode('utf-8'), file_name="backup.csv", mime="text/csv", use_container_width=True)
+        except: pass
+        csv_upload = col2.file_uploader("Subir CSV", type=["csv"], key="up_csv", label_visibility="collapsed")
+        if col2.button("⬆️ Restaurar", use_container_width=True) and csv_upload:
+            try:
+                pd.read_csv(csv_upload).to_sql('registros_dosimetria', engine, if_exists='append', index=False)
+                st.success("Restaurado."); st.cache_data.clear(); st.rerun()
+            except Exception as e: st.error(str(e))
 
 # --- INTERFAZ PRINCIPAL ---
-resultados = cargar_y_transformar_datos()
+if df_flat.empty:
+    st.info("👈 Despliega 'Opciones de Administración' en el panel izquierdo para cargar el archivo Excel Maestro.")
+    st.stop()
 
-if isinstance(resultados, tuple):
-    df_flat, meses_nombres = resultados
-
-    tab_datos, tab_avisos = st.tabs(["📊 Tabla Principal", "⚠️ Avisos Pendientes"])
-
-    with tab_datos:
-        # Filtros
-        st.sidebar.markdown("---")
-        st.sidebar.markdown("### 🔍 Buscador y Filtros")
+def resolver_aviso(tipo, aviso_id, codigo, dato, datos_alta=None):
+    conn = psycopg2.connect(
+        host=pg["host"], database=pg["database"], user=pg["user"], password=pg["password"], port=pg["port"]
+    )
+    cur = conn.cursor()
+    
+    if tipo == "no_entregado":
+        cur.execute("INSERT INTO registros_dosimetria (codigo_dosimetro, periodo, dosis_hsm, dosis_hpm, observaciones) VALUES (%s, %s, NULL, NULL, 'No entregado') ON CONFLICT (codigo_dosimetro, periodo) DO UPDATE SET observaciones = 'No entregado';", (codigo, dato))
+        cur.execute("UPDATE avisos SET estado = 'Resuelto' WHERE id = %s", (aviso_id,))
+    elif tipo == "baja":
+        cur.execute("UPDATE maestro_dosimetros SET fecha_baja = %s WHERE codigo = %s", (dato, codigo))
+        cur.execute("UPDATE avisos SET estado = 'Resuelto' WHERE codigo_dosimetro = %s AND periodo >= %s AND estado = 'Pendiente';", (codigo, dato))
+    elif tipo == "confirmar_alta":
+        cur.execute("""
+            UPDATE maestro_dosimetros 
+            SET apellidos = %s, nombre = %s, dni = %s, centro = %s, dosimetro = %s
+            WHERE codigo = %s;
+        """, (datos_alta['apellidos'], datos_alta['nombre'], datos_alta['dni'], datos_alta['centro'], datos_alta['dosimetro'], codigo))
+        cur.execute("UPDATE avisos SET estado = 'Resuelto' WHERE id = %s", (aviso_id,))
         
-        busqueda_texto = st.sidebar.text_input("🔎 Buscador Rápido:", placeholder="Nombre, DNI...", key="filtro_busqueda").strip().lower()
-        centros_disponibles = sorted([str(c).strip() for c in df_flat["CENTRO"].dropna().unique() if str(c).strip() != "" and str(c).lower() != "nan"], key=quitar_tildes)
-        st.session_state["filtro_centros"] = [c for c in st.session_state.get("filtro_centros", []) if c in centros_disponibles]
-        centros_seleccionados = st.sidebar.multiselect("🏢 Filtrar por Centro:", options=centros_disponibles, placeholder="Todos los centros...", key="filtro_centros")
+    conn.commit()
+    conn.close()
+    st.cache_data.clear()
+    st.rerun()
 
-        df_display = df_flat.copy()
-        if centros_seleccionados: df_display = df_display[df_display["CENTRO"].isin(centros_seleccionados)]
-        if busqueda_texto:
-            busqueda_normalizada = quitar_tildes(busqueda_texto)
-            mask = (df_display["NOMBRE"].apply(quitar_tildes).str.contains(busqueda_normalizada, na=False) |
-                    df_display["DNI"].astype(str).str.lower().str.contains(busqueda_texto, na=False) |
-                    df_display["CODIGO"].astype(str).str.lower().str.contains(busqueda_texto, na=False) |
-                    df_display["CENTRO"].apply(quitar_tildes).str.contains(busqueda_normalizada, na=False))
-            df_display = df_display[mask]
+# RECUPERAR AVISOS DE LA BD
+df_avisos = pd.read_sql_query("""
+    SELECT a.id, a.codigo_dosimetro, m.nombre, m.apellidos, m.centro, m.dosimetro, 
+           TO_CHAR(a.periodo, 'YYYY-MM-DD') as periodo, 
+           COALESCE(a.tipo_aviso, 'Faltan lecturas') as tipo_aviso
+    FROM avisos a 
+    JOIN maestro_dosimetros m ON a.codigo_dosimetro = m.codigo 
+    WHERE a.estado = 'Pendiente'
+      AND (
+          a.tipo_aviso = 'Alta nueva'
+          OR NOT EXISTS (
+              SELECT 1 FROM registros_dosimetria r 
+              WHERE r.codigo_dosimetro = a.codigo_dosimetro 
+                AND r.periodo = a.periodo 
+                AND (
+                    r.dosis_hsm IS NOT NULL 
+                    OR r.dosis_hpm IS NOT NULL 
+                    OR (r.observaciones IS NOT NULL AND r.observaciones != '')
+                )
+          )
+      )
+""", engine)
 
-        # --- JAVASCRIPT: ALERTA AL EDITAR ---
-        js_confirm = JsCode("""
-        function(params) {
-            var oldVal = params.oldValue;
-            if (oldVal !== null && oldVal !== undefined && oldVal !== '') {
-                var confirmEdit = window.confirm('⚠️ ¿Seguro que quieres editar esta casilla? Ya contiene datos extraídos.');
-                if (!confirmEdit) { return false; }
-            }
-            params.data[params.colDef.field] = params.newValue;
-            return true;
+num_avisos = len(df_avisos) if st.session_state.filtro_centro == "Todos los centros" else len(df_avisos[df_avisos["centro"] == st.session_state.filtro_centro])
+
+tab_datos, tab_avisos = st.tabs(["📊 Tabla Principal", f"⚠️ Avisos ({num_avisos})"])
+
+# --- PESTAÑA 1: TABLA PRINCIPAL ---
+with tab_datos:
+    if st.session_state.mes_sin_lectura != "-- Ver todos --":
+        st.warning(f"⚠️ Mostrando {len(df_display)} trabajador(es) sin lectura en **{st.session_state.mes_sin_lectura}**.")
+
+    js_confirm = JsCode("""
+    function(params) {
+        var oldVal = (params.oldValue === null || params.oldValue === undefined) ? '' : String(params.oldValue).trim();
+        var newVal = (params.newValue === null || params.newValue === undefined) ? '' : String(params.newValue).trim();
+        if (oldVal === newVal) { return false; }
+        if (oldVal !== '') {
+            if (!window.confirm('⚠️ ¿Seguro que quieres editar esta casilla? Ya contiene datos.')) { return false; }
         }
-        """)
+        params.data[params.colDef.field] = params.newValue;
+        return true;
+    }
+    """)
 
-        # --- CORRECCIÓN: HACER EDITABLES LOS DATOS PERSONALES (MENOS EL CÓDIGO) ---
-        column_defs = [
-            {"field": "NOMBRE", "headerName": "NOMBRE", "width": 280, "pinned": "left", "suppressSizeToFit": True, "filter": True, "editable": True, "valueSetter": js_confirm},
-            {"field": "DNI", "headerName": "DNI", "width": 120, "suppressSizeToFit": True, "filter": True, "editable": True, "valueSetter": js_confirm},
-            {"field": "CENTRO", "headerName": "CENTRO", "width": 220, "suppressSizeToFit": True, "filter": True, "editable": True, "valueSetter": js_confirm},
-            {"field": "DOSIMETRO", "headerName": "DOSIMETRO", "width": 130, "suppressSizeToFit": True, "filter": True, "editable": True, "valueSetter": js_confirm},
-            # CÓDIGO BLOQUEADO
-            {"field": "CODIGO", "headerName": "CODIGO", "width": 130, "suppressSizeToFit": True, "filter": True, "editable": False},
-            {"field": "FECHA ALTA", "headerName": "FECHA ALTA", "width": 120, "suppressSizeToFit": True, "editable": True, "valueSetter": js_confirm},
-            {"field": "FECHA BAJA", "headerName": "FECHA BAJA", "width": 120, "suppressSizeToFit": True, "editable": True, "valueSetter": js_confirm},
-        ]
-        
-        for m in range(1, 13):
-            mes = meses_nombres[m]
-            column_defs.append({
-                "headerName": mes,
-                "children": [
-                    {"field": f"{mes}_HSM", "headerName": "HSM", "width": 90, "editable": True, "valueSetter": js_confirm, "type": ["numericColumn"], "valueFormatter": "x === null || x === undefined ? '' : Number(x).toFixed(2)", "suppressSizeToFit": True},
-                    {"field": f"{mes}_HPM", "headerName": "HPM", "width": 90, "editable": True, "valueSetter": js_confirm, "type": ["numericColumn"], "valueFormatter": "x === null || x === undefined ? '' : Number(x).toFixed(2)", "suppressSizeToFit": True},
-                    {"field": f"{mes}_OBS", "headerName": "Observaciones", "width": 180, "editable": True, "valueSetter": js_confirm, "suppressSizeToFit": True}
-                ]
-            })
+    js_row_style = JsCode("""
+    function(params) {
+        if (params.data && params.data['FECHA BAJA']) {
+            var val = String(params.data['FECHA BAJA']).trim();
+            if (val !== '' && val !== 'None' && val !== 'null' && val !== 'undefined') {
+                return {
+                    'backgroundColor': '#e2e8f0',
+                    'color': '#64748b'
+                };
+            }
+        }
+        return null;
+    }
+    """)
 
+    js_dose_style = JsCode("""
+    function(params) {
+        if (params.value === null || params.value === undefined || params.value === '') {
+            return null;
+        }
+        var val = parseFloat(String(params.value).replace(',', '.'));
+        if (isNaN(val)) return null;
+
+        var dosimetro = params.data && params.data['DOSIMETRO'] ? String(params.data['DOSIMETRO']).toUpperCase() : '';
+        var esExtremidad = dosimetro.includes('ANILLO') || dosimetro.includes('MUÑECA') || dosimetro.includes('CANELL') || dosimetro.includes('EXTREMIDAD');
+
+        if (esExtremidad && val > 20.0) {
+            return {'backgroundColor': '#fee2e2', 'color': '#991b1b', 'fontWeight': 'bold'};
+        } else if (!esExtremidad && val > 1.0) {
+            return {'backgroundColor': '#fee2e2', 'color': '#991b1b', 'fontWeight': 'bold'};
+        }
+        return null;
+    }
+    """)
+
+    column_defs = [
+        {"field": "NOMBRE", "headerName": "NOMBRE", "width": 280, "pinned": "left", "suppressSizeToFit": True, "filter": True, "editable": True, "valueSetter": js_confirm},
+        {"field": "DNI", "headerName": "DNI", "width": 120, "suppressSizeToFit": True, "filter": True, "editable": True, "valueSetter": js_confirm},
+        {"field": "CENTRO", "headerName": "CENTRO", "width": 220, "suppressSizeToFit": True, "filter": True, "editable": True, "valueSetter": js_confirm},
+        {"field": "DOSIMETRO", "headerName": "DOSIMETRO", "width": 130, "suppressSizeToFit": True, "filter": True, "editable": True, "valueSetter": js_confirm},
+        {"field": "CODIGO", "headerName": "CODIGO", "width": 130, "suppressSizeToFit": True, "filter": True, "editable": True, "valueSetter": js_confirm},
+        {"field": "FECHA ALTA", "headerName": "FECHA ALTA", "width": 120, "suppressSizeToFit": True, "editable": True, "valueSetter": js_confirm},
+        {"field": "FECHA BAJA", "headerName": "FECHA BAJA", "width": 120, "suppressSizeToFit": True, "editable": True, "valueSetter": js_confirm},
+    ]
+    
+    for m in range(1, 13):
+        mes = meses_nombres[m]
         column_defs.append({
-            "headerName": "ACUMULADO ANUAL",
+            "headerName": mes,
             "children": [
-                {"field": "ACUMULADO_HSM", "headerName": "HSM", "width": 110, "type": ["numericColumn"], "cellStyle": {"fontWeight": "bold", "backgroundColor": "#f1f5f9"}, "valueFormatter": "x === null || x === undefined ? '0.00' : Number(x).toFixed(2)", "suppressSizeToFit": True},
-                {"field": "ACUMULADO_HPM", "headerName": "HPM", "width": 110, "type": ["numericColumn"], "cellStyle": {"fontWeight": "bold", "backgroundColor": "#f1f5f9"}, "valueFormatter": "x === null || x === undefined ? '0.00' : Number(x).toFixed(2)", "suppressSizeToFit": True}
+                {"field": f"{mes}_HSM", "headerName": "HSM", "width": 90, "editable": True, "valueSetter": js_confirm, "type": ["numericColumn"], "valueFormatter": "x === null || x === undefined ? '' : Number(x).toFixed(2)", "cellStyle": js_dose_style, "suppressSizeToFit": True},
+                {"field": f"{mes}_HPM", "headerName": "HPM", "width": 90, "editable": True, "valueSetter": js_confirm, "type": ["numericColumn"], "valueFormatter": "x === null || x === undefined ? '' : Number(x).toFixed(2)", "cellStyle": js_dose_style, "suppressSizeToFit": True},
+                {"field": f"{mes}_OBS", "headerName": "Observaciones", "width": 180, "editable": True, "valueSetter": js_confirm, "suppressSizeToFit": True}
             ]
         })
 
-        gb = GridOptionsBuilder.from_dataframe(df_display)
-        gridOptions = gb.build()
-        gridOptions["columnDefs"] = column_defs
+    column_defs.append({
+        "headerName": "ACUMULADO ANUAL",
+        "children": [
+            {"field": "ACUMULADO_HSM", "headerName": "HSM", "width": 110, "type": ["numericColumn"], "cellStyle": {"fontWeight": "bold", "backgroundColor": "#f1f5f9"}, "valueFormatter": "x === null || x === undefined ? '0.00' : Number(x).toFixed(2)", "suppressSizeToFit": True},
+            {"field": "ACUMULADO_HPM", "headerName": "HPM", "width": 110, "type": ["numericColumn"], "cellStyle": {"fontWeight": "bold", "backgroundColor": "#f1f5f9"}, "valueFormatter": "x === null || x === undefined ? '0.00' : Number(x).toFixed(2)", "suppressSizeToFit": True}
+        ]
+    })
 
-        # --- DIBUJAR TABLA CON MODO DE ACTUALIZACIÓN DE VALORES ---
-        grid_response = AgGrid(
-            df_display, 
-            gridOptions=gridOptions, 
-            height=1000, 
-            theme='alpine', 
-            fit_columns_on_grid_load=False, 
-            allow_unsafe_jscode=True,
-            update_mode=GridUpdateMode.VALUE_CHANGED,
-            data_return_mode=DataReturnMode.FILTERED_AND_SORTED
-        )
+    gb = GridOptionsBuilder.from_dataframe(df_display)
+    gridOptions = gb.build()
+    gridOptions["columnDefs"] = column_defs
+    gridOptions["getRowStyle"] = js_row_style
 
-        # --- LOGICA DE AUTOGUARDADO EN BD ---
-        df_new = pd.DataFrame(grid_response['data'])
-        
-        if not df_new.empty and not df_display.empty:
-            df_old_idx = df_display.set_index("CODIGO")
-            df_new_idx = df_new.set_index("CODIGO")
-            cambios_detectados = False
+    estilos_tabla = {
+        ".ag-header-cell-label": {"justify-content": "center !important", "width": "100% !important"},
+        ".ag-header-group-cell-label": {"justify-content": "center !important", "width": "100% !important"},
+        ".ag-cell": {"display": "flex !important", "align-items": "center !important", "justify-content": "center !important"}
+    }
 
-            try:
-                conn = psycopg2.connect(host=pg["host"], database=pg["database"], user=pg["user"], password=pg["password"], port=pg["port"])
-                cur = conn.cursor()
+    grid_response = AgGrid(
+        df_display, 
+        gridOptions=gridOptions, 
+        height=1000, 
+        theme='alpine', 
+        fit_columns_on_grid_load=False, 
+        allow_unsafe_jscode=True, 
+        update_mode=GridUpdateMode.VALUE_CHANGED, 
+        data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
+        custom_css=estilos_tabla
+    )
 
-                for codigo in df_new_idx.index:
-                    if codigo not in df_old_idx.index: continue
-                    
-                    row_old = df_old_idx.loc[codigo]
-                    row_new = df_new_idx.loc[codigo]
+    df_new = pd.DataFrame(grid_response['data'])
+    if not df_new.empty and not df_display.empty:
+        cambios_detectados = False
+        def safe_str(val): return "" if pd.isnull(val) else str(val).strip()
+        try:
+            conn = psycopg2.connect(
+                host=pg["host"], database=pg["database"], user=pg["user"], password=pg["password"], port=pg["port"]
+            )
+            cur = conn.cursor()
+            
+            for i in range(len(df_new)):
+                row_old = df_display.iloc[i]; row_new = df_new.iloc[i]
+                codigo_old = safe_str(row_old["CODIGO"]); codigo_new = safe_str(row_new["CODIGO"])
+                if not codigo_old: continue
 
-                    # 1. Detectar Cambios en Maestro Dosímetros
-                    update_maestro = False
-                    maestro_query = "UPDATE maestro_dosimetros SET "
-                    maestro_params = []
+                update_maestro = False; maestro_query = "UPDATE maestro_dosimetros SET "; maestro_params = []
+                if safe_str(row_old["NOMBRE"]) != safe_str(row_new["NOMBRE"]):
+                    partes = safe_str(row_new["NOMBRE"]).split(",", 1)
+                    maestro_query += "apellidos = %s, nombre = %s, "
+                    maestro_params.extend([partes[0].strip(), partes[1].strip() if len(partes) > 1 else ""])
+                    update_maestro = True
 
-                    # Nombre (Separación Apellidos / Nombre)
-                    if str(row_old["NOMBRE"]) != str(row_new["NOMBRE"]):
-                        partes = str(row_new["NOMBRE"]).split(",", 1)
-                        apellidos = partes[0].strip()
-                        nombre = partes[1].strip() if len(partes) > 1 else ""
-                        maestro_query += "apellidos = %s, nombre = %s, "
-                        maestro_params.extend([apellidos, nombre])
+                for col, db_col in [("CODIGO", "codigo"), ("DNI", "dni"), ("CENTRO", "centro"), ("DOSIMETRO", "dosimetro"), ("FECHA ALTA", "fecha_alta"), ("FECHA BAJA", "fecha_baja")]:
+                    if safe_str(row_old[col]) != safe_str(row_new[col]):
+                        maestro_query += f"{db_col} = %s, "
+                        val = safe_str(row_new[col])
+                        maestro_params.append(val if val else None)
                         update_maestro = True
 
-                    # Resto Maestro (Centro, DNI, Dosimetro)
-                    for col, db_col in [("DNI", "dni"), ("CENTRO", "centro"), ("DOSIMETRO", "dosimetro")]:
-                        if str(row_old[col]) != str(row_new[col]):
-                            maestro_query += f"{db_col} = %s, "
-                            maestro_params.append(str(row_new[col]))
-                            update_maestro = True
+                if update_maestro:
+                    maestro_query = maestro_query.rstrip(", ") + " WHERE codigo = %s"
+                    maestro_params.append(codigo_old)
+                    cur.execute(maestro_query, maestro_params)
+                    
+                    val_baja = safe_str(row_new["FECHA BAJA"])
+                    if val_baja:
+                        cur.execute("""
+                            UPDATE avisos 
+                            SET estado = 'Resuelto' 
+                            WHERE codigo_dosimetro = %s AND periodo >= %s AND estado = 'Pendiente';
+                        """, (codigo_new, val_baja))
+                    
+                    cambios_detectados = True
 
-                    # Fechas
-                    for col, db_col in [("FECHA ALTA", "fecha_alta"), ("FECHA BAJA", "fecha_baja")]:
-                        old_v = str(row_old[col]) if pd.notnull(row_old[col]) else ""
-                        new_v = str(row_new[col]) if pd.notnull(row_new[col]) else ""
-                        if old_v != new_v:
-                            maestro_query += f"{db_col} = %s, "
-                            maestro_params.append(new_v if new_v else None)
-                            update_maestro = True
+                def fmt_val(v, is_num=True):
+                    if pd.isnull(v) or str(v).strip() in ["", "nan"]: return None
+                    if is_num:
+                        try: return float(str(v).replace(",", "."))
+                        except: return None
+                    return str(v).strip()
 
-                    if update_maestro:
-                        maestro_query = maestro_query.rstrip(", ") + " WHERE codigo = %s"
-                        maestro_params.append(codigo)
-                        cur.execute(maestro_query, maestro_params)
+                for m in range(1, 13):
+                    mes = meses_nombres[m]
+                    if fmt_val(row_old[f"{mes}_HSM"]) != fmt_val(row_new[f"{mes}_HSM"]) or fmt_val(row_old[f"{mes}_HPM"]) != fmt_val(row_new[f"{mes}_HPM"]) or fmt_val(row_old[f"{mes}_OBS"], False) != fmt_val(row_new[f"{mes}_OBS"], False):
+                        fecha_sql = f"2026-{m:02d}-01"
+                        new_hsm = fmt_val(row_new[f"{mes}_HSM"]); new_hpm = fmt_val(row_new[f"{mes}_HPM"])
+                        cur.execute("""INSERT INTO registros_dosimetria (codigo_dosimetro, periodo, dosis_hsm, dosis_hpm, observaciones) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (codigo_dosimetro, periodo) DO UPDATE SET dosis_hsm = EXCLUDED.dosis_hsm, dosis_hpm = EXCLUDED.dosis_hpm, observaciones = EXCLUDED.observaciones;""", (codigo_new, fecha_sql, new_hsm, new_hpm, fmt_val(row_new[f"{mes}_OBS"], False)))
+                        if new_hsm is not None or new_hpm is not None:
+                            cur.execute("UPDATE avisos SET estado = 'Resuelto' WHERE codigo_dosimetro = %s AND periodo = %s", (codigo_new, fecha_sql))
                         cambios_detectados = True
 
-                    # 2. Detectar Cambios en Dosis Mensuales
-                    def fmt_val(v, is_num=True):
-                        if pd.isnull(v) or str(v).strip() == "": return None
-                        if is_num:
-                            try: return float(v)
-                            except: return None
-                        return str(v).strip()
+            if cambios_detectados: conn.commit(); st.cache_data.clear(); st.rerun()
+        except Exception as e: st.error(f"Error: {e}")
+        finally: 
+            if 'conn' in locals() and conn: conn.close()
 
-                    for m in range(1, 13):
-                        mes = meses_nombres[m]
-                        
-                        old_hsm = fmt_val(row_old[f"{mes}_HSM"])
-                        new_hsm = fmt_val(row_new[f"{mes}_HSM"])
-                        
-                        old_hpm = fmt_val(row_old[f"{mes}_HPM"])
-                        new_hpm = fmt_val(row_new[f"{mes}_HPM"])
-                        
-                        old_obs = fmt_val(row_old[f"{mes}_OBS"], is_num=False)
-                        new_obs = fmt_val(row_new[f"{mes}_OBS"], is_num=False)
-                        
-                        if old_hsm != new_hsm or old_hpm != new_hpm or old_obs != new_obs:
-                            fecha_sql = f"2026-{m:02d}-01"
-                            cur.execute("""
-                                INSERT INTO registros_dosimetria (codigo_dosimetro, periodo, dosis_hsm, dosis_hpm, observaciones)
-                                VALUES (%s, %s, %s, %s, %s)
-                                ON CONFLICT (codigo_dosimetro, periodo) DO UPDATE SET
-                                    dosis_hsm = EXCLUDED.dosis_hsm,
-                                    dosis_hpm = EXCLUDED.dosis_hpm,
-                                    observaciones = EXCLUDED.observaciones;
-                            """, (codigo, fecha_sql, new_hsm, new_hpm, new_obs))
-                            cambios_detectados = True
+# --- PESTAÑA 2: GESTIÓN DE AVISOS ---
+with tab_avisos:
+    st.markdown(f"### Gestión de Avisos y Notificaciones ({num_avisos} pendientes)")
+    centro_aviso = st.selectbox("Selecciona el centro para ver sus avisos:", options=opciones_centros, index=opciones_centros.index(st.session_state.filtro_centro))
+    
+    avisos_filtrados = df_avisos if centro_aviso == "Todos los centros" else df_avisos[df_avisos["centro"] == centro_aviso]
+    
+    if avisos_filtrados.empty:
+        st.success(f"🎉 ¡Todo al día! No hay avisos pendientes para {centro_aviso.lower()}.")
+    else:
+        avisos_lectura = avisos_filtrados[avisos_filtrados['tipo_aviso'] == 'Faltan lecturas']
+        avisos_altas = avisos_filtrados[avisos_filtrados['tipo_aviso'] == 'Alta nueva']
 
-                if cambios_detectados:
-                    conn.commit()
-                    st.cache_data.clear()
-                    st.rerun()
+        subtab_lecturas, subtab_altas = st.tabs([f"📌 Sin Dosis ({len(avisos_lectura)})", f"🆕 Altas Nuevas ({len(avisos_altas)})"])
 
-            except Exception as e:
-                st.error(f"Error al autoguardar: {e}")
-            finally:
-                if conn: conn.close()
+        with subtab_lecturas:
+            if avisos_lectura.empty:
+                st.info("No hay avisos de faltas de lectura.")
+            else:
+                dic_meses = {1: 'Enero', 2: 'Febrero', 3: 'Marzo', 4: 'Abril', 5: 'Mayo', 6: 'Junio', 7: 'Julio', 8: 'Agosto', 9: 'Septiembre', 10: 'Octubre', 11: 'Noviembre', 12: 'Diciembre'}
+                for per in sorted(avisos_lectura['periodo'].unique()):
+                    dt_p = pd.to_datetime(per)
+                    grupo_mes = avisos_lectura[avisos_lectura['periodo'] == per]
+                    st.markdown(f"#### 📅 {dic_meses.get(dt_p.month, '')} {dt_p.year} ({len(grupo_mes)})")
+                    
+                    for _, aviso in grupo_mes.iterrows():
+                        with st.expander(f"⚠️ {aviso['apellidos']}, {aviso['nombre']} ({aviso['dosimetro']}) — Centro: {aviso['centro']}", expanded=False):
+                            st.write(f"**Código:** {aviso['codigo_dosimetro']}")
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                if st.button("❌ Marcar No Entregado", key=f"btn_noent_{aviso['id']}"):
+                                    resolver_aviso("no_entregado", aviso['id'], aviso['codigo_dosimetro'], aviso['periodo'])
+                            with col2:
+                                fecha_baja = st.date_input("Fecha de Baja", value=pd.to_datetime(aviso['periodo']).date(), key=f"date_baja_{aviso['id']}")
+                                if st.button("🛑 Tramitar Baja", key=f"btn_baja_{aviso['id']}"):
+                                    resolver_aviso("baja", aviso['id'], aviso['codigo_dosimetro'], fecha_baja)
 
-    with tab_avisos:
-        df_avisos = pd.read_sql_query("""
-            SELECT a.id, a.codigo_dosimetro, m.nombre, m.apellidos, m.centro, m.dosimetro, TO_CHAR(a.periodo, 'YYYY-MM-DD') as periodo
-            FROM avisos a JOIN maestro_dosimetros m ON a.codigo_dosimetro = m.codigo WHERE a.estado = 'Pendiente'
-        """, engine)
-
-        if df_avisos.empty:
-            st.success("🎉 ¡Todo al día! No hay avisos pendientes.")
-        else:
-            st.warning(f"Tienes {len(df_avisos)} dosímetros pendientes de justificar.")
-            for _, aviso in df_avisos.iterrows():
-                with st.expander(f"⚠️ {aviso['apellidos']}, {aviso['nombre']} ({aviso['dosimetro']}) - Falta lectura de {aviso['periodo']}", expanded=False):
-                    st.write(f"**Centro:** {aviso['centro']} | **Código:** {aviso['codigo_dosimetro']}")
-                    col1, col2, col3 = st.columns([1, 1, 2])
-                    with col1:
-                        if st.button("❌ Marcar como No Entregado", key=f"btn_noent_{aviso['id']}"):
-                            resolver_no_entregado(aviso['id'], aviso['codigo_dosimetro'], aviso['periodo'])
-                    with col2:
-                        fecha_baja = st.date_input("Fecha de Baja", key=f"date_baja_{aviso['id']}")
-                        if st.button("🛑 Tramitar Baja", key=f"btn_baja_{aviso['id']}"):
-                            resolver_baja(aviso['id'], aviso['codigo_dosimetro'], fecha_baja)
-
-else:
-    st.info("Despliega '⚙️ Opciones de Administración' para cargar el archivo Excel Maestro.")
+        with subtab_altas:
+            if avisos_altas.empty:
+                st.info("No hay altas nuevas pendientes de revisar.")
+            else:
+                for _, aviso in avisos_altas.iterrows():
+                    with st.expander(f"🆕 Alta Detectada: {aviso['apellidos']}, {aviso['nombre']} ({aviso['codigo_dosimetro']})", expanded=True):
+                        st.caption(f"Registrado automáticamente desde PDF en periodo: {aviso['periodo']}")
+                        with st.form(key=f"form_alta_{aviso['id']}"):
+                            col_a1, col_a2 = st.columns(2)
+                            apellidos_edit = col_a1.text_input("Apellidos", value=aviso['apellidos'])
+                            nombre_edit = col_a2.text_input("Nombre", value=aviso['nombre'])
+                            
+                            col_a3, col_a4, col_a5 = st.columns(3)
+                            dni_edit = col_a3.text_input("DNI", value="")
+                            centro_edit = col_a4.text_input("Centro", value=aviso['centro'])
+                            dosimetro_edit = col_a5.selectbox("Dosímetro", options=["Solapa", "Anillo", "Muñeca"], index=["Solapa", "Anillo", "Muñeca"].index(aviso['dosimetro']) if aviso['dosimetro'] in ["Solapa", "Anillo", "Muñeca"] else 0)
+                            
+                            if st.form_submit_button("✅ Confirmar y Guardar Alta", use_container_width=True):
+                                datos_confirmados = {
+                                    'apellidos': apellidos_edit,
+                                    'nombre': nombre_edit,
+                                    'dni': dni_edit,
+                                    'centro': centro_edit,
+                                    'dosimetro': dosimetro_edit
+                                }
+                                resolver_aviso("confirmar_alta", aviso['id'], aviso['codigo_dosimetro'], aviso['periodo'], datos_alta=datos_confirmados)
