@@ -75,12 +75,18 @@ class BorrarRequest(BaseModel):
 
 @app.post("/api/login")
 def verificar_password(req: LoginRequest):
-    """Verifica la contraseña local o en Render"""
-    clave_real = TODOS_LOS_SECRETOS.get("app_password") or PG_SECRETS.get("app_password") or os.getenv("APP_PASSWORD")
+    # Intentar obtener la clave desde la variable de entorno de Render, o fallback a secretos locales
+    clave_real = os.getenv("APP_PASSWORD") or TODOS_LOS_SECRETOS.get("app_password") or PG_SECRETS.get("app_password")
+    
+    if not clave_real:
+        print("⚠️ ALERTA: No se ha encontrado ninguna variable APP_PASSWORD configurada.")
+        raise HTTPException(status_code=500, detail="Error de configuración en el servidor")
 
+    # Comparación limpia sin espacios ni saltos de línea
     if req.password.strip() == str(clave_real).strip():
         return {"status": "success"}
     else:
+        print(f"❌ Intento de login fallido. Recibido: '{req.password.strip()}' | Esperado: '{str(clave_real).strip()}'")
         raise HTTPException(status_code=401, detail="Contraseña incorrecta")
 
 @app.get("/api/dosimetria")
