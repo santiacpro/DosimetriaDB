@@ -8,3 +8,4 @@ openpyxl
 pdfplumber
 reportlab
 pypdf
+python-multipart
