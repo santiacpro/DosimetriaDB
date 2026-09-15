@@ -48,11 +48,14 @@ engine = iniciar_conexion(PG_SECRETS)
 inicializar_base_datos(engine)
 
 # --- CONFIGURACIÓN DE FASTAPI ---
-app = FastAPI(title="DosimetriaDB API", version="2.0")
+from fastapi.middleware.cors import CORSMiddleware
 
+app = FastAPI()
+
+# Añadir esto para permitir que Vercel se conecte sin ser bloqueado
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # En producción, cambia "*" por "http://localhost:5173"
+    allow_origins=["*"],  # Permite cualquier web (o pon la URL de Vercel)
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
