@@ -4,7 +4,7 @@ import axios from 'axios';
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-alpine.css';
 
-const API_URL = 'https://dosimetriadb.onrender.com/api';
+const API_URL = import.meta.env.VITE_API_URL || 'https://dosimetriadb.onrender.com/api';
 
 export default function App() {
   // =====================================================================
