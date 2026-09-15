@@ -75,9 +75,9 @@ class BorrarRequest(BaseModel):
 
 @app.post("/api/login")
 def verificar_password(req: LoginRequest):
-    """Verifica la contraseña ingresada contra el secrets.toml"""
-    clave_real = TODOS_LOS_SECRETOS.get("app_password") or PG_SECRETS.get("app_password")
-    
+    """Verifica la contraseña local o en Render"""
+    clave_real = TODOS_LOS_SECRETOS.get("app_password") or PG_SECRETS.get("app_password") or os.getenv("APP_PASSWORD")
+
     if req.password.strip() == str(clave_real).strip():
         return {"status": "success"}
     else:
